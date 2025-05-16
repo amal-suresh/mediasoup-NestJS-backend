@@ -5,6 +5,8 @@ import {
   Router,
   WorkerSettings,
   RouterOptions,
+  WebRtcTransport,
+  Producer,
 } from 'mediasoup/node/lib/types';
 
 @Injectable()
@@ -12,7 +14,10 @@ export class MediasoupService implements OnModuleInit, OnModuleDestroy {
   private worker: Worker;
   private router: Router;
 
-  // You can tweak settings or pull from config
+  private producerTransports = new Map<string, WebRtcTransport>();
+  private consumerTransports = new Map<string, WebRtcTransport>();
+  private producers = new Map<string, Producer>();
+
   private workerSettings: WorkerSettings = {
     rtcMinPort: 2000,
     rtcMaxPort: 2020,
@@ -41,17 +46,12 @@ export class MediasoupService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    if (this.router) {
-      await this.router.close();
-    }
-    if (this.worker) {
-      await this.worker.close();
-    }
+    if (this.router) await this.router.close();
+    if (this.worker) await this.worker.close();
   }
 
   private async createWorker() {
     this.worker = await mediasoup.createWorker(this.workerSettings);
-
     console.log(`Mediasoup worker created, PID: ${this.worker.pid}`);
 
     this.worker.on('died', () => {
@@ -61,24 +61,62 @@ export class MediasoupService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async createRouter() {
-    if (!this.worker) {
-      throw new Error('Worker not initialized yet');
-    }
+    if (!this.worker) throw new Error('Worker not initialized');
     this.router = await this.worker.createRouter(this.routerOptions);
     console.log('Mediasoup router created');
   }
 
-  getWorker(): Worker {
-    if (!this.worker) {
-      throw new Error('Worker not initialized yet');
-    }
-    return this.worker;
-  }
-
   getRouter(): Router {
-    if (!this.router) {
-      throw new Error('Router not initialized yet');
-    }
+    if (!this.router) throw new Error('Router not initialized');
     return this.router;
   }
+
+  // Producer transport methods
+  addProducerTransport(clientId: string, transport: WebRtcTransport) {
+    this.producerTransports.set(clientId, transport);
+  }
+
+  getProducerTransport(clientId: string): WebRtcTransport | undefined {
+    return this.producerTransports.get(clientId);
+  }
+
+  removeProducerTransport(clientId: string) {
+    const transport = this.producerTransports.get(clientId);
+    if (transport) transport.close();
+    this.producerTransports.delete(clientId);
+  }
+
+  // Consumer transport methods
+  addConsumerTransport(clientId: string, transport: WebRtcTransport) {
+    this.consumerTransports.set(clientId, transport);
+  }
+
+  getConsumerTransport(clientId: string): WebRtcTransport | undefined {
+    return this.consumerTransports.get(clientId);
+  }
+
+  removeConsumerTransport(clientId: string) {
+    const transport = this.consumerTransports.get(clientId);
+    if (transport) transport.close();
+    this.consumerTransports.delete(clientId);
+  }
+
+  // Producers management
+  addProducer(clientId: string, producer: Producer) {
+    this.producers.set(clientId, producer);
+  }
+
+  getProducer(clientId: string): Producer | undefined {
+    return this.producers.get(clientId);
+  }
+
+  removeProducer(clientId: string) {
+    const producer = this.producers.get(clientId);
+    if (producer) producer.close();
+    this.producers.delete(clientId);
+  }
+
+  getProducers(): Map<string, Producer> {
+  return this.producers;
+}
 }
