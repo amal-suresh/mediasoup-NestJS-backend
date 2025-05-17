@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
-import { MediasoupGateway } from './mediasoup.gateway';
 import { MediasoupService } from './mediasoup.service';
+import { MediasoupGateway } from './mediasoup.gateway';
 
 @Module({
   providers: [MediasoupService, MediasoupGateway],
-  exports: [MediasoupService], 
+  exports: [MediasoupService],
 })
 export class MediasoupModule {}
