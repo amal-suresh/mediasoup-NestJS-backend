@@ -9,7 +9,7 @@ export class MediasoupService {
   private peerProducers: Map<string, mediasoup.types.Producer> = new Map();
   private peerConsumers: Map<string, mediasoup.types.Consumer> = new Map();
   private broadcasterSocketId: string | null = null;
-  private broadcasterProducerId: string | null = null;
+  private broadcasterProducerIds: Map<string, { id: string; kind: string; label: string }> = new Map();
   private viewerCountCallback: (count: number) => void = () => {};
 
   constructor() {
@@ -71,18 +71,20 @@ export class MediasoupService {
   handleDisconnect(socketId: string) {
     this.peerTransports.delete(socketId);
     this.peerProducers.delete(socketId);
-    this.peerConsumers.delete(socketId);
+    const consumerKeys = Array.from(this.peerConsumers.keys()).filter(key => key.startsWith(`${socketId}:`));
+    consumerKeys.forEach(key => this.peerConsumers.delete(key));
     if (this.broadcasterSocketId === socketId) {
       this.broadcasterSocketId = null;
-      this.broadcasterProducerId = null;
+      this.broadcasterProducerIds.clear();
       console.log(`Broadcaster ${socketId} disconnected, cleared broadcaster data`);
     }
     this.notifyViewerCount();
   }
 
   private notifyViewerCount() {
-    const count = this.peerConsumers.size;
-    console.log(`Notifying viewer count: ${count}`);
+    const viewerIds = new Set(Array.from(this.peerConsumers.keys()).map(key => key.split(':')[0]));
+    const count = viewerIds.size;
+    console.log(`Notifying viewer count: ${count} (viewer IDs: ${Array.from(viewerIds)})`);
     this.viewerCountCallback(count);
   }
 
@@ -99,7 +101,7 @@ export class MediasoupService {
     };
 
     const transport = await this.router.createWebRtcTransport(webRtcTransportOptions);
-    console.log(`Transport created: ${transport.id}`);
+    console.log(`Transport created for peer ${peerId}: ${transport.id}`);
 
     transport.on('dtlsstatechange', (dtlsState) => {
       if (dtlsState === 'closed') {
@@ -108,7 +110,7 @@ export class MediasoupService {
     });
 
     transport.on('@close', () => {
-      console.log('Transport closed');
+      console.log(`Transport closed for peer ${peerId}`);
     });
 
     if (!this.peerTransports.has(peerId)) {
@@ -128,29 +130,32 @@ export class MediasoupService {
     const transport = this.peerTransports.get(peerId)?.producerTransport;
     if (transport) {
       await transport.connect({ dtlsParameters });
+      console.log(`Producer transport connected for peer ${peerId}`);
     }
   }
 
-  async produce(peerId: string, kind: mediasoup.types.MediaKind, rtpParameters: mediasoup.types.RtpParameters) {
+  async produce(peerId: string, kind: mediasoup.types.MediaKind, rtpParameters: mediasoup.types.RtpParameters, label: string = '') {
     const transport = this.peerTransports.get(peerId)?.producerTransport;
     if (!transport) {
       throw new Error('Producer transport not found');
     }
 
     const producer = await transport.produce({ kind, rtpParameters });
-    this.peerProducers.set(peerId, producer);
+    const producerKey = `${peerId}:${kind}:${label}`;
+    this.peerProducers.set(producerKey, producer);
     if (this.broadcasterSocketId === peerId) {
-      this.broadcasterProducerId = producer.id;
-      console.log(`Broadcaster producer ID set: ${producer.id}`);
+      this.broadcasterProducerIds.set(`${kind}:${label}`, { id: producer.id, kind, label });
+      console.log(`Broadcaster producer ID set: ${producer.id} for ${kind} (${label})`);
+      console.log(`Current broadcasterProducerIds:`, Array.from(this.broadcasterProducerIds.entries()));
     }
 
     producer.on('transportclose', () => {
-      console.log('Producer transport closed');
+      console.log(`Producer transport closed for ${kind} (${label})`);
       producer.close();
-      this.peerProducers.delete(peerId);
-      if (this.broadcasterProducerId === producer.id) {
-        this.broadcasterProducerId = null;
-        console.log(`Broadcaster producer cleared`);
+      this.peerProducers.delete(producerKey);
+      if (this.broadcasterSocketId === peerId) {
+        this.broadcasterProducerIds.delete(`${kind}:${label}`);
+        console.log(`Broadcaster producer cleared for ${kind} (${label})`);
       }
     });
 
@@ -161,58 +166,90 @@ export class MediasoupService {
     const transport = this.peerTransports.get(peerId)?.consumerTransport;
     if (transport) {
       await transport.connect({ dtlsParameters });
+      console.log(`Consumer transport connected for peer ${peerId}`);
     }
   }
 
   async consume(peerId: string, rtpCapabilities: mediasoup.types.RtpCapabilities) {
-    if (!this.broadcasterProducerId || !this.broadcasterSocketId || !this.peerProducers.has(this.broadcasterSocketId)) {
+    if (!this.broadcasterSocketId || this.broadcasterProducerIds.size === 0) {
       throw new Error('No broadcaster available');
     }
-    const producer = this.peerProducers.get(this.broadcasterSocketId);
-    if (!producer || !this.router.canConsume({ producerId: this.broadcasterProducerId, rtpCapabilities })) {
-      throw new Error('Cannot consume broadcaster stream');
-    }
+
+    console.log(`Consumer RTP capabilities for peer ${peerId}:`, rtpCapabilities);
+    console.log(`Broadcaster producers available:`, Array.from(this.broadcasterProducerIds.entries()));
 
     const transport = this.peerTransports.get(peerId)?.consumerTransport;
     if (!transport) {
       throw new Error('Consumer transport not found');
     }
 
-    const consumer = await transport.consume({
-      producerId: this.broadcasterProducerId,
-      rtpCapabilities,
-      paused: producer.kind === 'video',
-    });
+    const consumerParams: { producerId: string; id: string; kind: string; rtpParameters: mediasoup.types.RtpParameters; label: string }[] = [];
+    for (const [key, { id: producerId, kind, label }] of this.broadcasterProducerIds) {
+      const producer = this.peerProducers.get(`${this.broadcasterSocketId}:${key}`);
+      if (!producer) {
+        console.log(`Producer not found for ${key} (producerId: ${producerId})`);
+        continue;
+      }
+      const canConsume = this.router.canConsume({ producerId, rtpCapabilities });
+      console.log(`Can consume producer ${producerId} for ${key} (kind: ${kind}, label: ${label}): ${canConsume}`);
+      if (!canConsume) {
+        console.log(`Skipping producer ${producerId} due to incompatible RTP capabilities`);
+        continue;
+      }
 
-    this.peerConsumers.set(peerId, consumer);
+      try {
+        const consumer = await transport.consume({
+          producerId,
+          rtpCapabilities,
+          paused: kind === 'video',
+        });
+
+        this.peerConsumers.set(`${peerId}:${producerId}`, consumer);
+        console.log(`Added consumer for peer ${peerId}, producer ${producerId} (${kind}, ${label})`);
+
+        consumer.on('transportclose', () => {
+          console.log(`Consumer transport closed for ${producerId}`);
+          consumer.close();
+          this.peerConsumers.delete(`${peerId}:${producerId}`);
+          this.notifyViewerCount();
+        });
+
+        consumer.on('producerclose', () => {
+          console.log(`Producer closed for ${producerId}`);
+          consumer.close();
+          this.peerConsumers.delete(`${peerId}:${producerId}`);
+          this.notifyViewerCount();
+        });
+
+        consumerParams.push({
+          producerId,
+          id: consumer.id,
+          kind,
+          rtpParameters: consumer.rtpParameters,
+          label,
+        });
+      } catch (error) {
+        console.error(`Error creating consumer for producer ${producerId} (${kind}, ${label}):`, error);
+      }
+    }
+
+    console.log(`Returning consumerParams for peer ${peerId}:`, consumerParams);
+
+    if (consumerParams.length === 0) {
+      throw new Error('No consumable producers available');
+    }
+
     this.notifyViewerCount();
-
-    consumer.on('transportclose', () => {
-      console.log('Consumer transport closed');
-      consumer.close();
-      this.peerConsumers.delete(peerId);
-      this.notifyViewerCount();
-    });
-
-    consumer.on('producerclose', () => {
-      console.log('Producer closed');
-      consumer.close();
-      this.peerConsumers.delete(peerId);
-      this.notifyViewerCount();
-    });
-
-    return {
-      producerId: this.broadcasterProducerId,
-      id: consumer.id,
-      kind: consumer.kind,
-      rtpParameters: consumer.rtpParameters,
-    };
+    return consumerParams;
   }
 
-  async resumeConsumer(peerId: string) {
-    const consumer = this.peerConsumers.get(peerId);
-    if (consumer) {
-      await consumer.resume();
+  async resumeConsumer(peerId: string, producerIds: string[]) {
+    for (const producerId of producerIds) {
+      const consumer = this.peerConsumers.get(`${peerId}:${producerId}`);
+      if (consumer) {
+        await consumer.resume();
+        console.log(`Resumed consumer for peer ${peerId}, producer ${producerId}`);
+      }
     }
   }
 }

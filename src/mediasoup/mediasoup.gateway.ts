@@ -11,8 +11,11 @@ export class MediasoupGateway {
     this.mediasoupService.setViewerCountCallback((count: number) => {
       const broadcasterSocketId = this.mediasoupService.getBroadcasterSocketId();
       if (broadcasterSocketId) {
+        console.log(`Emitting viewerCount ${count} to broadcaster ${broadcasterSocketId}`);
         this.server.to(broadcasterSocketId).emit('viewerCount', { count });
         console.log(`Sent viewer count ${count} to broadcaster ${broadcasterSocketId}`);
+      } else {
+        console.log('No broadcaster socket ID available for viewerCount emission');
       }
     });
   }
@@ -74,10 +77,10 @@ export class MediasoupGateway {
   @SubscribeMessage('transport-produce')
   async handleTransportProduce(
     socket: Socket,
-    { kind, rtpParameters }: { kind: mediasoup.types.MediaKind; rtpParameters: mediasoup.types.RtpParameters }
+    { kind, rtpParameters, label }: { kind: mediasoup.types.MediaKind; rtpParameters: mediasoup.types.RtpParameters; label: string }
   ) {
-    console.log(`Producing for socket ${socket.id}, kind: ${kind}`);
-    const producerId = await this.mediasoupService.produce(socket.id, kind, rtpParameters);
+    console.log(`Producing for socket ${socket.id}, kind: ${kind}, label: ${label}`);
+    const producerId = await this.mediasoupService.produce(socket.id, kind, rtpParameters, label);
     console.log(`Produced, producer ID: ${producerId}`);
     return { id: producerId };
   }
@@ -102,10 +105,10 @@ export class MediasoupGateway {
     }
   }
 
-  @SubscribeMessage('resumePausedConsumer')
-  async handleResumePausedConsumer(socket: Socket) {
-    console.log(`Resuming consumer for socket ${socket.id}`);
-    await this.mediasoupService.resumeConsumer(socket.id);
+  @SubscribeMessage('resumePausedConsumers')
+  async handleResumePausedConsumers(socket: Socket, producerIds: string[]) {
+    console.log(`Resuming consumers for socket ${socket.id}, producerIds:`, producerIds);
+    await this.mediasoupService.resumeConsumer(socket.id, producerIds);
     return { success: true };
   }
 }
